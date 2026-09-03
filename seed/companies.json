@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Apple",
+    "ticker": "AAPL",
+    "exchange": "NASDAQ",
+    "sector": "Technology",
+    "aliases": ["Apple Inc.", "Apple Inc", "AAPL"]
+  },
+  {
+    "name": "Microsoft",
+    "ticker": "MSFT",
+    "exchange": "NASDAQ",
+    "sector": "Technology",
+    "aliases": ["Microsoft Corporation", "Microsoft Corp", "MSFT"]
+  }
+]

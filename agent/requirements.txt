@@ -1,0 +1,4 @@
+# Pin exact versions after your first `pip install` (these evolve quickly).
+strands-agents>=1.0
+bedrock-agentcore>=0.1
+boto3>=1.40

@@ -1,0 +1,48 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    environment:
+      SERVICES: sqs,dynamodb
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+
+  agent:
+    build:
+      context: ./agent
+    env_file: .env
+    environment:
+      JOBS_TABLE: analyst-jobs
+      DDB_ENDPOINT_URL: http://localstack:4566
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.aws:/root/.aws:ro
+    depends_on:
+      - localstack
+
+  web:
+    build: .
+    env_file: .env
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/analyst-jobs
+      JOBS_TABLE: analyst-jobs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - localstack
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/analyst-jobs
+      JOBS_TABLE: analyst-jobs
+      AGENT_LOCAL_URL: http://agent:8080/invocations
+    depends_on:
+      - localstack
+      - agent

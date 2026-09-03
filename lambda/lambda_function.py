@@ -4,119 +4,31 @@ Replaces the background ECS worker with serverless Lambda.
 
 Triggered by: SQS queue (analyst-jobs)
 Timeout: 15 minutes (Lambda maximum)
+
+Reuses existing app functions for DynamoDB updates, progress tracking, and agent invocation.
 """
 import json
 import logging
+import sys
 import os
-import boto3
-import time
-from botocore.config import Config
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS Clients
-ddb_resource = boto3.resource("dynamodb")
-agentcore_client = boto3.client("bedrock-agentcore")
+# Add app directory to path so we can import shared modules
+app_dir = os.path.join(os.path.dirname(__file__), "..")
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
 
-# Configuration
-JOBS_TABLE = os.environ.get("JOBS_TABLE", "analyst-jobs")
-AGENT_RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-AGENT_INVOKE_TIMEOUT = int(os.environ.get("AGENT_INVOKE_TIMEOUT", "900"))
-
-jobs_table = ddb_resource.Table(JOBS_TABLE)
-
-
-def update_job_status(job_id: str, status: str, **kwargs):
-    """Update job status in DynamoDB."""
-    try:
-        update_expr = "SET #status = :status"
-        expr_names = {"#status": "status"}
-        expr_values = {":status": status}
-
-        for key, val in kwargs.items():
-            expr_names[f"#{key}"] = key
-            expr_values[f":{key}"] = val
-            update_expr += f", #{key} = :{key}"
-
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression=update_expr,
-            ExpressionAttributeNames=expr_names,
-            ExpressionAttributeValues=expr_values,
-        )
-        logger.info(f"Updated job {job_id} status: {status}")
-    except Exception as e:
-        logger.error(f"Failed to update job {job_id}: {str(e)}")
-        raise
-
-
-def append_progress_step(job_id: str, step_text: str):
-    """Append a progress step to the job's steps list."""
-    try:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #steps = list_append(if_not_exists(#steps, :empty), :new)",
-            ExpressionAttributeNames={"#steps": "steps"},
-            ExpressionAttributeValues={
-                ":empty": [],
-                ":new": [{"t": int(time.time()), "text": step_text}],
-            },
-        )
-        logger.info(f"Job {job_id} progress: {step_text}")
-    except Exception as e:
-        logger.error(f"Failed to append progress for {job_id}: {str(e)}")
-
-
-def invoke_agentcore_runtime(company: str, job_id: str) -> str:
-    """
-    Invoke the Bedrock AgentCore Runtime synchronously.
-
-    Returns: The brief text from the agent
-    Raises: Exception if invocation fails or times out
-    """
-    try:
-        logger.info(f"Invoking AgentCore Runtime for {company} (job_id={job_id})")
-        append_progress_step(job_id, f"🚀 Starting research on {company}…")
-
-        payload = json.dumps({
-            "company": company,
-            "job_id": job_id
-        }).encode()
-
-        # Invoke agent runtime with custom timeout
-        config = Config(
-            connect_timeout=10,
-            read_timeout=AGENT_INVOKE_TIMEOUT,
-            retries={"max_attempts": 0},
-        )
-        client = boto3.client("bedrock-agentcore", region_name=AWS_REGION, config=config)
-
-        response = client.invoke_agent_runtime(
-            agentRuntimeArn=AGENT_RUNTIME_ARN,
-            runtimeSessionId=job_id,  # Use job_id as session ID
-            payload=payload,
-        )
-
-        # Read response
-        response_data = json.loads(response["response"].read().decode("utf-8"))
-        brief = response_data.get("brief", "")
-
-        logger.info(f"Agent completed for job {job_id}, brief length: {len(brief)}")
-        append_progress_step(job_id, "✅ Brief ready.")
-
-        return brief
-
-    except Exception as e:
-        logger.error(f"AgentCore Runtime invocation failed: {str(e)}")
-        append_progress_step(job_id, f"❌ Error: {str(e)}")
-        raise
+# Import shared functions from app (DRY - Don't Repeat Yourself)
+from app import ddb, agentcore, progress
 
 
 def process_sqs_message(record: dict) -> bool:
     """
     Process a single SQS message.
+
+    Reuses app.ddb, app.agentcore, and app.progress modules for all operations.
 
     Returns: True if successful, False if failed
     """
@@ -127,19 +39,23 @@ def process_sqs_message(record: dict) -> bool:
         company = body.get("company")
 
         if not job_id or not company:
-            logger.error(f"Invalid message: missing job_id or company")
+            logger.error("Invalid message: missing job_id or company")
             return False
 
         logger.info(f"Processing job {job_id} for company {company}")
 
-        # Update job status to RUNNING
-        update_job_status(job_id, "RUNNING")
+        # Mark job as RUNNING (reuse existing ddb.update)
+        ddb.update(job_id, "RUNNING")
 
-        # Invoke agent runtime
-        brief = invoke_agentcore_runtime(company, job_id)
+        # Set job context for progress.emit() to append steps
+        progress.set_job(job_id)
 
-        # Save result
-        update_job_status(job_id, "DONE", result=brief)
+        # Invoke agent runtime (reuse existing agentcore.run_brief)
+        # This function internally calls progress.emit() for live updates
+        brief = agentcore.run_brief(company, job_id)
+
+        # Save result (reuse existing ddb.update)
+        ddb.update(job_id, "DONE", result=brief)
 
         logger.info(f"Job {job_id} completed successfully")
         return True
@@ -147,12 +63,12 @@ def process_sqs_message(record: dict) -> bool:
     except Exception as e:
         logger.error(f"Failed to process message: {str(e)}")
 
-        # Try to update job with error status
+        # Try to update job with error status (reuse existing ddb.update)
         try:
             body = json.loads(record["body"])
             job_id = body.get("job_id")
             if job_id:
-                update_job_status(job_id, "FAILED", error=str(e))
+                ddb.update(job_id, "FAILED", error=str(e))
         except Exception as inner_e:
             logger.error(f"Failed to update job error status: {str(inner_e)}")
 

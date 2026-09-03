@@ -1,0 +1,2 @@
+# boto3 is built into the Lambda Python runtime (python3.12)
+# No external dependencies required; boto3 version is maintained by AWS
